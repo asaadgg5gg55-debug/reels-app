@@ -1,5 +1,5 @@
 name: reels_app
-description: Reels app
+description: Personal links and video app
 publish_to: none
 version: 1.0.0+1
 
@@ -11,6 +11,9 @@ dependencies:
     sdk: flutter
   photo_manager: ^3.6.0
   video_player: ^2.9.0
+  webview_flutter: ^4.9.0
+  shared_preferences: ^2.3.0
+  http: ^1.2.0
 
 flutter:
   uses-material-design: true
