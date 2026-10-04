@@ -19,6 +19,7 @@ jobs:
         run: flutter create --platforms=android --org com.example --project-name reels_app .
       - name: Add permissions
         run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
           sed -i '/<application/i \    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>' android/app/src/main/AndroidManifest.xml
           sed -i '/<application/i \    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>' android/app/src/main/AndroidManifest.xml
       - run: flutter pub get
