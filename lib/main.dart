@@ -6,6 +6,7 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'publish.dart';
 
 void main() => runApp(const App());
 
@@ -137,6 +138,21 @@ class _HomeState extends State<Home> {
   List<AssetEntity> local = [];
   bool loaded = false;
   bool denied = false;
+  int postsVersion = 0;
+
+  Future<void> openPublish() async {
+    final p = await Navigator.push<Post>(
+      context,
+      MaterialPageRoute(builder: (c) => const PublishPage()),
+    );
+    if (p != null && mounted) {
+      setState(() {
+        postsVersion++;
+        tab = 2;
+        page = 0;
+      });
+    }
+  }
 
   Future<void> loadLocal() async {
     final ps = await PhotoManager.requestPermissionExtend();
@@ -213,6 +229,9 @@ class _HomeState extends State<Home> {
         child: LinksTab(),
       );
     }
+    if (tab == 2) {
+      return PostsTab(key: ValueKey('posts$postsVersion'));
+    }
     return deviceBody();
   }
 
@@ -220,10 +239,14 @@ class _HomeState extends State<Home> {
     final on = tab == index;
     return TextButton(
       onPressed: () => setTab(index),
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        minimumSize: const Size(10, 40),
+      ),
       child: Text(
         label,
         style: TextStyle(
-          fontSize: 18,
+          fontSize: 16,
           fontWeight: FontWeight.w800,
           color: on ? Colors.white : Colors.white54,
         ),
@@ -248,6 +271,7 @@ class _HomeState extends State<Home> {
                     children: [
                       tabButton(0, 'روابطي'),
                       tabButton(1, 'جهازي'),
+                      tabButton(2, 'منشوراتي'),
                     ],
                   ),
                 ),
@@ -256,6 +280,13 @@ class _HomeState extends State<Home> {
                   child: IconButton(
                     icon: const Icon(Icons.download),
                     onPressed: () => askAndDownload(context),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    icon: const Icon(Icons.add_box_outlined),
+                    onPressed: openPublish,
                   ),
                 ),
               ],
@@ -597,6 +628,19 @@ class _LocalVideoState extends State<LocalVideo> {
     });
   }
 
+  Future<void> publishThis() async {
+    final f = await widget.asset.file;
+    if (f == null || !mounted) return;
+    ctrl?.pause();
+    final p = await Navigator.push<Post>(
+      context,
+      MaterialPageRoute(builder: (c) => PublishPage(initialFile: f)),
+    );
+    if (!mounted) return;
+    if (p != null) toast(context, 'تم النشر، شوفه في منشوراتي');
+    if (widget.active) ctrl?.play();
+  }
+
   @override
   Widget build(BuildContext context) {
     final v = ctrl;
@@ -623,20 +667,33 @@ class _LocalVideoState extends State<LocalVideo> {
         ReelActions(
           user: '@أنا',
           desc: widget.asset.title ?? 'فيديو من هاتفك',
+          extra: [
+            ExtraAction(Icons.cloud_upload_outlined, 'نشر', publishThis),
+          ],
         ),
       ],
     );
   }
 }
 
+class ExtraAction {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const ExtraAction(this.icon, this.label, this.onTap);
+}
+
 class ReelActions extends StatefulWidget {
   final String user;
   final String desc;
+  final List<ExtraAction> extra;
 
   const ReelActions({
     super.key,
     required this.user,
     required this.desc,
+    this.extra = const [],
   });
 
   @override
@@ -784,6 +841,8 @@ class _ReelActionsState extends State<ReelActions> {
                 () => setState(() => saved = !saved),
                 saved,
               ),
+              for (final a in widget.extra)
+                btn(a.icon, a.label, a.onTap, false),
             ],
           ),
         ),
