@@ -1,8 +1,8 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,90 +10,111 @@ import 'package:video_player/video_player.dart';
 import 'main.dart';
 
 // ---------------------------------------------------------------
-// إعدادات Cloudinary (تُحفظ في الهاتف، تكتبها مرة واحدة من التطبيق)
+// تسجيل الدخول بحساب جوجل (Google Drive الخاص بك)
+// صلاحية drive.file: التطبيق يرى فقط الملفات اللي رفعها هو
 // ---------------------------------------------------------------
 
-class CloudConfig {
-  final String cloud;
-  final String preset;
+const driveScope = 'https://www.googleapis.com/auth/drive.file';
+const driveFolderName = 'Reels';
+const driveTag = 'reelsapp';
 
-  const CloudConfig(this.cloud, this.preset);
+class DriveAuth {
+  static final GoogleSignIn _g = GoogleSignIn(scopes: [driveScope]);
 
-  bool get ok => cloud.isNotEmpty && preset.isNotEmpty;
+  static GoogleSignInAccount? get user => _g.currentUser;
 
-  static Future<CloudConfig> load() async {
-    final p = await SharedPreferences.getInstance();
-    return CloudConfig(
-      p.getString('cloud_name') ?? '',
-      p.getString('cloud_preset') ?? '',
-    );
+  static Future<GoogleSignInAccount?> ensure({bool interactive = false}) async {
+    GoogleSignInAccount? a = _g.currentUser;
+    a ??= await _g.signInSilently();
+    if (a == null && interactive) a = await _g.signIn();
+    return a;
   }
 
-  Future<void> save() async {
+  static Future<Map<String, String>?> headers({
+    bool interactive = false,
+    bool refresh = false,
+  }) async {
+    final a = await ensure(interactive: interactive);
+    if (a == null) return null;
+    if (refresh) await a.clearAuthCache();
+    return a.authHeaders;
+  }
+
+  static Future<void> signOut() async {
+    await _g.signOut();
     final p = await SharedPreferences.getInstance();
-    await p.setString('cloud_name', cloud);
-    await p.setString('cloud_preset', preset);
+    await p.remove('drive_folder');
   }
 }
 
-Future<CloudConfig?> showCloudSettings(
-  BuildContext ctx,
-  CloudConfig current,
-) async {
-  final a = TextEditingController(text: current.cloud);
-  final b = TextEditingController(text: current.preset);
-  final ok = await showDialog<bool>(
+String friendlyError(Object e) {
+  final s = e.toString().replaceFirst('Exception: ', '');
+  if (s.contains('ApiException: 10') || s.contains('DEVELOPER_ERROR')) {
+    return 'إعداد تسجيل الدخول غير صحيح (تأكد من SHA-1 واسم الحزمة في Google Cloud)';
+  }
+  if (s.contains('sign_in_canceled') || s.contains('ApiException: 12501')) {
+    return 'تم إلغاء تسجيل الدخول';
+  }
+  if (s.contains('network_error') || s.contains('SocketException')) {
+    return 'مشكلة في الإنترنت';
+  }
+  return s;
+}
+
+Future<void> showDriveAccount(BuildContext ctx) async {
+  await showDialog<void>(
     context: ctx,
     builder: (d) {
-      return AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('إعدادات التخزين'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'انسخهم من حسابك في cloudinary.com',
-              style: TextStyle(color: Colors.white54, fontSize: 13),
-            ),
-            TextField(
-              controller: a,
+      return StatefulBuilder(
+        builder: (d, set) {
+          final u = DriveAuth.user;
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1A1A1A),
+            title: const Text('حساب Google Drive'),
+            content: Text(
+              u == null ? 'غير مسجل الدخول' : u.email,
               textDirection: TextDirection.ltr,
-              decoration: const InputDecoration(hintText: 'Cloud name'),
+              textAlign: TextAlign.right,
             ),
-            TextField(
-              controller: b,
-              textDirection: TextDirection.ltr,
-              decoration: const InputDecoration(
-                hintText: 'Upload preset (Unsigned)',
+            actions: [
+              if (u != null)
+                TextButton(
+                  onPressed: () async {
+                    await DriveAuth.signOut();
+                    set(() {});
+                  },
+                  child: const Text('تسجيل الخروج'),
+                ),
+              TextButton(
+                onPressed: () async {
+                  try {
+                    if (u != null) await DriveAuth.signOut();
+                    await DriveAuth.ensure(interactive: true);
+                  } catch (e) {
+                    if (d.mounted) toast(d, friendlyError(e));
+                  }
+                  set(() {});
+                },
+                child: Text(u == null ? 'تسجيل الدخول' : 'تبديل الحساب'),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d, false),
-            child: const Text('إلغاء'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(d, true),
-            child: const Text('حفظ'),
-          ),
-        ],
+              TextButton(
+                onPressed: () => Navigator.pop(d),
+                child: const Text('إغلاق'),
+              ),
+            ],
+          );
+        },
       );
     },
   );
-  if (ok != true) return null;
-  final cfg = CloudConfig(a.text.trim(), b.text.trim());
-  await cfg.save();
-  return cfg;
 }
 
 // ---------------------------------------------------------------
 // المنشورات
 // ---------------------------------------------------------------
 
-const cloudTag = 'reelsapp';
+String driveMediaUrl(String id) =>
+    'https://www.googleapis.com/drive/v3/files/$id?alt=media';
 
 class Post {
   final String id;
@@ -156,7 +177,7 @@ class PostStore {
     return (p.getStringList('hidden_posts') ?? []).toSet();
   }
 
-  // إزالة من القائمة فقط (الملف يبقى في Cloudinary)
+  // إزالة من القائمة فقط (الملف يبقى في Drive)
   static Future<void> hide(String id) async {
     final p = await SharedPreferences.getInstance();
     final h = await hiddenIds();
@@ -167,37 +188,40 @@ class PostStore {
     await _save(l);
   }
 
-  // يجلب قائمة الفيديوهات من Cloudinary (حسب الوسم) ويدمجها مع المحلية.
-  // يرجع null إذا فشل (مثلاً الخيار محظور في إعدادات الحساب).
+  // يجلب قائمة الفيديوهات من Drive (اللي رفعها التطبيق) ويدمجها مع المحلية.
+  // يرجع null إذا فشل (مثلاً مش مسجل دخول أو مفيش إنترنت).
   static Future<List<Post>?> syncRemote(List<Post> local) async {
-    final cfg = await CloudConfig.load();
-    if (!cfg.ok) return null;
     try {
-      final uri = Uri.parse(
-        'https://res.cloudinary.com/${cfg.cloud}/video/list/$cloudTag.json',
-      );
-      final r = await http.get(uri).timeout(const Duration(seconds: 12));
+      final h = await DriveAuth.headers();
+      if (h == null) return null;
+      final uri = Uri.https('www.googleapis.com', '/drive/v3/files', {
+        'q': "appProperties has { key='$driveTag' and value='1' } "
+            "and trashed=false",
+        'fields': 'files(id,description,createdTime)',
+        'orderBy': 'createdTime desc',
+        'pageSize': '100',
+      });
+      final r = await http.get(uri, headers: h).timeout(
+            const Duration(seconds: 12),
+          );
       if (r.statusCode != 200) return null;
-      final j = jsonDecode(r.body) as Map;
+      final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map;
       final hidden = await hiddenIds();
       final byId = {for (final p in local) p.id: p};
-      for (final item in (j['resources'] as List? ?? [])) {
+      for (final item in (j['files'] as List? ?? [])) {
         final m = item as Map;
-        final id = m['public_id'].toString();
+        final id = m['id'].toString();
         if (hidden.contains(id) || byId.containsKey(id)) continue;
-        final fmt = (m['format'] ?? 'mp4').toString();
-        final url = 'https://res.cloudinary.com/${cfg.cloud}'
-            '/video/upload/v${m['version']}/$id.$fmt';
-        final ctx = m['context'];
-        String cap = '';
-        if (ctx is Map && ctx['custom'] is Map) {
-          cap = (ctx['custom']['caption'] ?? '').toString();
-        }
         final t = DateTime.tryParse(
-              (m['created_at'] ?? '').toString(),
+              (m['createdTime'] ?? '').toString(),
             )?.millisecondsSinceEpoch ??
             0;
-        byId[id] = Post(id: id, url: url, caption: cap, time: t);
+        byId[id] = Post(
+          id: id,
+          url: driveMediaUrl(id),
+          caption: (m['description'] ?? '').toString(),
+          time: t,
+        );
       }
       final all = byId.values.toList()
         ..sort((a, b) => b.time.compareTo(a.time));
@@ -209,75 +233,126 @@ class PostStore {
 }
 
 // ---------------------------------------------------------------
-// الرفع مع شريط تقدم
+// الرفع إلى Google Drive مع شريط تقدم
 // ---------------------------------------------------------------
 
-class _ProgressRequest extends http.MultipartRequest {
-  final void Function(int sent, int total) onProgress;
-
-  _ProgressRequest(String method, Uri url, this.onProgress)
-      : super(method, url);
-
-  @override
-  http.ByteStream finalize() {
-    final total = contentLength;
-    var sent = 0;
-    final stream = super.finalize();
-    return http.ByteStream(
-      stream.transform(
-        StreamTransformer<List<int>, List<int>>.fromHandlers(
-          handleData: (data, sink) {
-            sent += data.length;
-            onProgress(sent, total);
-            sink.add(data);
-          },
-        ),
-      ),
-    );
-  }
+String _driveError(String body, int code) {
+  try {
+    final j = jsonDecode(body) as Map;
+    final err = j['error'];
+    if (err is Map && err['message'] != null) {
+      return err['message'].toString();
+    }
+  } catch (_) {}
+  return 'فشل الرفع ($code)';
 }
 
-String _escCtx(String s) {
-  return s
-      .replaceAll(r'\', r'\\')
-      .replaceAll('=', r'\=')
-      .replaceAll('|', r'\|');
+String _mimeOf(String path) {
+  final p = path.toLowerCase();
+  if (p.endsWith('.mov')) return 'video/quicktime';
+  if (p.endsWith('.webm')) return 'video/webm';
+  if (p.endsWith('.mkv')) return 'video/x-matroska';
+  if (p.endsWith('.3gp')) return 'video/3gpp';
+  return 'video/mp4';
+}
+
+Future<String> _folderId(Map<String, String> h, {bool force = false}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final saved = prefs.getString('drive_folder');
+  if (saved != null && !force) return saved;
+  final r = await http.post(
+    Uri.parse('https://www.googleapis.com/drive/v3/files?fields=id'),
+    headers: {...h, 'Content-Type': 'application/json; charset=UTF-8'},
+    body: jsonEncode({
+      'name': driveFolderName,
+      'mimeType': 'application/vnd.google-apps.folder',
+    }),
+  );
+  if (r.statusCode != 200) {
+    throw Exception(_driveError(utf8.decode(r.bodyBytes), r.statusCode));
+  }
+  final id = (jsonDecode(r.body) as Map)['id'].toString();
+  await prefs.setString('drive_folder', id);
+  return id;
+}
+
+Future<http.Response> _startSession(
+  Map<String, String> h,
+  String folder,
+  File file,
+  String caption,
+  int len,
+) {
+  final mime = _mimeOf(file.path);
+  final stamp = DateTime.now().millisecondsSinceEpoch;
+  final ext = file.path.contains('.') ? file.path.split('.').last : 'mp4';
+  return http.post(
+    Uri.parse(
+      'https://www.googleapis.com/upload/drive/v3/files'
+      '?uploadType=resumable&fields=id,createdTime',
+    ),
+    headers: {
+      ...h,
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': mime,
+      'X-Upload-Content-Length': '$len',
+    },
+    body: jsonEncode({
+      'name': 'reel_$stamp.$ext',
+      'description': caption,
+      'parents': [folder],
+      'appProperties': {driveTag: '1'},
+    }),
+  );
 }
 
 Future<Post> uploadVideo(
   File file,
   String caption,
-  CloudConfig cfg,
+  Map<String, String> h,
   void Function(double) onProgress,
 ) async {
-  final uri = Uri.parse(
-    'https://api.cloudinary.com/v1_1/${cfg.cloud}/video/upload',
+  final len = await file.length();
+  var folder = await _folderId(h);
+  var start = await _startSession(h, folder, file, caption, len);
+  if (start.statusCode == 404) {
+    // المجلد اتحذف من Drive، نعمل واحد جديد
+    folder = await _folderId(h, force: true);
+    start = await _startSession(h, folder, file, caption, len);
+  }
+  if (start.statusCode != 200) {
+    throw Exception(_driveError(utf8.decode(start.bodyBytes), start.statusCode));
+  }
+  final loc = start.headers['location'];
+  if (loc == null) throw Exception('رد غير مفهوم من Drive');
+
+  final req = http.StreamedRequest('PUT', Uri.parse(loc));
+  req.headers['Content-Type'] = _mimeOf(file.path);
+  req.contentLength = len;
+  final respFuture = req.send();
+  var sent = 0;
+  file.openRead().listen(
+    (chunk) {
+      sent += chunk.length;
+      onProgress(len == 0 ? 0 : sent / len);
+      req.sink.add(chunk);
+    },
+    onDone: () => req.sink.close(),
+    onError: (Object e) {
+      req.sink.addError(e);
+      req.sink.close();
+    },
+    cancelOnError: true,
   );
-  final req = _ProgressRequest('POST', uri, (s, t) {
-    onProgress(t == 0 ? 0 : s / t);
-  });
-  req.fields['upload_preset'] = cfg.preset;
-  req.fields['tags'] = cloudTag;
-  if (caption.isNotEmpty) {
-    req.fields['context'] = 'caption=${_escCtx(caption)}';
-  }
-  req.files.add(await http.MultipartFile.fromPath('file', file.path));
-  final resp = await req.send();
+  final resp = await respFuture;
   final body = await resp.stream.bytesToString();
-  Map j;
-  try {
-    j = jsonDecode(body) as Map;
-  } catch (_) {
-    throw Exception('رد غير مفهوم من الخادم (${resp.statusCode})');
+  if (resp.statusCode != 200 && resp.statusCode != 201) {
+    throw Exception(_driveError(body, resp.statusCode));
   }
-  if (resp.statusCode != 200) {
-    final err = j['error'];
-    final msg = err is Map ? err['message'] : null;
-    throw Exception(msg?.toString() ?? 'فشل الرفع (${resp.statusCode})');
-  }
+  final id = (jsonDecode(body) as Map)['id'].toString();
   return Post(
-    id: j['public_id'].toString(),
-    url: j['secure_url'].toString(),
+    id: id,
+    url: driveMediaUrl(id),
     caption: caption,
     time: DateTime.now().millisecondsSinceEpoch,
   );
@@ -300,7 +375,7 @@ class _PublishPageState extends State<PublishPage> {
   File? file;
   VideoPlayerController? pv;
   final caption = TextEditingController();
-  CloudConfig cfg = const CloudConfig('', '');
+  bool signedIn = DriveAuth.user != null;
   double? progress;
   bool uploading = false;
   String? error;
@@ -308,9 +383,9 @@ class _PublishPageState extends State<PublishPage> {
   @override
   void initState() {
     super.initState();
-    CloudConfig.load().then((c) {
-      if (mounted) setState(() => cfg = c);
-    });
+    DriveAuth.ensure().then((a) {
+      if (mounted) setState(() => signedIn = a != null);
+    }).catchError((_) {});
     final f = widget.initialFile;
     if (f != null) {
       file = f;
@@ -357,9 +432,9 @@ class _PublishPageState extends State<PublishPage> {
     await setFile(File(x.path));
   }
 
-  Future<void> settings() async {
-    final c = await showCloudSettings(context, cfg);
-    if (c != null && mounted) setState(() => cfg = c);
+  Future<void> account() async {
+    await showDriveAccount(context);
+    if (mounted) setState(() => signedIn = DriveAuth.user != null);
   }
 
   Future<void> publish() async {
@@ -368,20 +443,19 @@ class _PublishPageState extends State<PublishPage> {
       toast(context, 'اختار فيديو الأول');
       return;
     }
-    if (!cfg.ok) {
-      await settings();
-      if (!cfg.ok) return;
-    }
     setState(() {
       uploading = true;
       progress = 0;
       error = null;
     });
     try {
+      final h = await DriveAuth.headers(interactive: true);
+      if (h == null) throw Exception('لازم تسجّل دخول بحساب جوجل');
+      if (mounted) setState(() => signedIn = true);
       final post = await uploadVideo(
         f,
         caption.text.trim(),
-        cfg,
+        h,
         (p) {
           if (mounted) setState(() => progress = p);
         },
@@ -395,7 +469,7 @@ class _PublishPageState extends State<PublishPage> {
       setState(() {
         uploading = false;
         progress = null;
-        error = e.toString().replaceFirst('Exception: ', '');
+        error = friendlyError(e);
       });
     }
   }
@@ -456,8 +530,8 @@ class _PublishPageState extends State<PublishPage> {
         title: const Text('نشر فيديو'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: uploading ? null : settings,
+            icon: const Icon(Icons.account_circle_outlined),
+            onPressed: uploading ? null : account,
           ),
         ],
       ),
@@ -481,7 +555,7 @@ class _PublishPageState extends State<PublishPage> {
               border: OutlineInputBorder(),
             ),
           ),
-          if (!cfg.ok)
+          if (!signedIn)
             Container(
               margin: const EdgeInsets.only(bottom: 12),
               padding: const EdgeInsets.all(12),
@@ -492,11 +566,11 @@ class _PublishPageState extends State<PublishPage> {
               child: Row(
                 children: [
                   const Expanded(
-                    child: Text('لازم تضبط حساب التخزين (Cloudinary) مرة واحدة'),
+                    child: Text('سجّل دخول بحساب جوجل (Drive) مرة واحدة'),
                   ),
                   TextButton(
-                    onPressed: settings,
-                    child: const Text('إعداد'),
+                    onPressed: account,
+                    child: const Text('دخول'),
                   ),
                 ],
               ),
@@ -574,7 +648,7 @@ class _PostsTabState extends State<PostsTab> {
           backgroundColor: const Color(0xFF1A1A1A),
           title: const Text('إزالة من منشوراتي؟'),
           content: const Text(
-            'هيتشال من القائمة بس، والملف هيفضل على Cloudinary.',
+            'هيتشال من القائمة بس، والملف هيفضل في Google Drive.',
           ),
           actions: [
             TextButton(
@@ -664,9 +738,16 @@ class _CloudVideoState extends State<CloudVideo> {
     init();
   }
 
-  Future<void> init() async {
+  Future<void> init({bool refresh = false}) async {
     if (failed) setState(() => failed = false);
-    final vc = VideoPlayerController.networkUrl(Uri.parse(widget.post.url));
+    Map<String, String>? h;
+    try {
+      h = await DriveAuth.headers(refresh: refresh);
+    } catch (_) {}
+    final vc = VideoPlayerController.networkUrl(
+      Uri.parse(widget.post.url),
+      httpHeaders: h ?? const <String, String>{},
+    );
     try {
       await vc.initialize();
     } catch (_) {
@@ -724,7 +805,10 @@ class _CloudVideoState extends State<CloudVideo> {
           children: [
             const Text('تعذر تشغيل الفيديو'),
             const SizedBox(height: 8),
-            FilledButton(onPressed: init, child: const Text('إعادة المحاولة')),
+            FilledButton(
+              onPressed: () => init(refresh: true),
+              child: const Text('إعادة المحاولة'),
+            ),
           ],
         ),
       );
@@ -765,7 +849,11 @@ class _CloudVideoState extends State<CloudVideo> {
               : widget.post.caption,
           extra: [
             ExtraAction(Icons.link, 'نسخ الرابط', () async {
-              await Clipboard.setData(ClipboardData(text: widget.post.url));
+              await Clipboard.setData(
+                ClipboardData(
+                  text: 'https://drive.google.com/file/d/${widget.post.id}/view',
+                ),
+              );
               if (context.mounted) toast(context, 'تم نسخ الرابط');
             }),
           ],
